@@ -8,6 +8,7 @@ from matplotlib.animation import FuncAnimation
 import threading
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import time
+import serial.tools.list_ports
 
 # Serial port configuration
 BAUD_RATE = 115200
@@ -23,8 +24,14 @@ latest_values = {"Sensor1": 0, "Sensor2": 0, "Sensor3": 0, "Sensor4": 0}
 
 # Function to detect available COM ports
 def get_com_ports():
-    import serial.tools.list_ports
     return [port.device for port in serial.tools.list_ports.comports()]
+
+# Function to refresh COM port list
+def refresh_com_ports():
+    com_ports = get_com_ports()
+    com_port_dropdown["values"] = com_ports
+    if com_ports:
+        com_port_var.set(com_ports[0])  # Select the first available port
 
 # Function to connect to selected COM port
 def connect_serial():
@@ -60,15 +67,18 @@ def read_serial():
 
 # Function to save data continuously to Excel
 def save_continuous():
+    if not saving_active:
+        return
     df = pd.DataFrame(data_list)
     df.to_excel(file_path, index=False)
     print("Data updated in Excel.")
 
 # Function to start saving to Excel
 def start_saving():
-    global file_path
+    global file_path, saving_active
     file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
     if file_path:
+        saving_active = True
         print(f"Saving data to {file_path}")
 
 # Function to update live plot
@@ -112,7 +122,7 @@ def stop_saving():
 # GUI setup
 root = tk.Tk()
 root.title("Temperature Data Logger")
-root.geometry("900x600")  # Adjust window size dynamically
+root.geometry("1000x700")  # Adjusted for better fullscreen handling
 
 frame = tk.Frame(root)
 frame.pack()
@@ -124,6 +134,8 @@ connect_button = tk.Button(frame, text="Connect", command=connect_serial)
 connect_button.grid(row=0, column=1, padx=5, pady=5)
 connection_status = tk.Label(frame, text="Disconnected", fg="red")
 connection_status.grid(row=0, column=2, padx=5, pady=5)
+refresh_button = tk.Button(frame, text="Refresh", command=refresh_com_ports)
+refresh_button.grid(row=0, column=3, padx=5, pady=5)
 
 start_button = tk.Button(frame, text="Start Logging", command=start_logging)
 start_button.grid(row=1, column=0, padx=5, pady=5)
@@ -135,7 +147,7 @@ stop_saving_button = tk.Button(frame, text="Stop Saving", command=stop_saving)
 stop_saving_button.grid(row=1, column=3, padx=5, pady=5)
 
 # Live plot setup
-fig, ax = plt.subplots(figsize=(8,4))  # Adjusted size
+fig, ax = plt.subplots(figsize=(9, 5))  # Adjusted size
 canvas = FigureCanvasTkAgg(fig, master=root)
 canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)  # Adjust to fit full screen
 ani = FuncAnimation(fig, update_plot, interval=500)
