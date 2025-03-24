@@ -1,0 +1,257 @@
+import tkinter as tk
+from tkinter import ttk, filedialog
+import serial
+from serial.tools import list_ports
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import pandas as pd
+from collections import deque
+import threading
+import time
+
+class TemperatureDataLogger:
+    def __init__(self, master):
+        self.master = master
+        master.title("Temperature Data Logger")
+
+        # Setup variables
+        self.is_plotting = False
+        self.is_logging = False
+        self.serial_data = [deque(maxlen=100) for _ in range(4)]
+        self.time_data = deque(maxlen=100)
+        self.raw_data = []
+        self.ser = None
+        self.baudrate = 115200
+        self.plot_start_time = 0
+        self.log_start_time = 0
+        self.current_values = [tk.DoubleVar() for _ in range(4)]
+        self.elapsed_time = tk.StringVar(value="00:00:00")
+        self.save_path = ""
+
+        # Create GUI elements
+        self.setup_gui()
+        self.update_com_ports()
+
+    def setup_gui(self):
+        # COM Port Selection Frame
+        com_frame = ttk.Frame(self.master)
+        com_frame.pack(padx=10, pady=5, fill=tk.X)
+
+        ttk.Label(com_frame, text="COM Port:").pack(side=tk.LEFT, padx=2)
+        self.port_combobox = ttk.Combobox(com_frame, state='readonly', width=15)
+        self.port_combobox.pack(side=tk.LEFT, padx=2)
+        
+        refresh_btn = ttk.Button(com_frame, text="Refresh", command=self.update_com_ports)
+        refresh_btn.pack(side=tk.LEFT, padx=5)
+
+        # Connection indicator
+        self.conn_indicator = tk.Canvas(com_frame, width=20, height=20)
+        self.conn_indicator.pack(side=tk.LEFT, padx=10)
+        self.indicator = self.conn_indicator.create_oval(2, 2, 18, 18, fill='red')
+
+        # Main Control Frame
+        main_control_frame = ttk.Frame(self.master)
+        main_control_frame.pack(padx=10, pady=5, fill=tk.X)
+
+        # Left Side: Plot/Log Controls
+        control_frame = ttk.Frame(main_control_frame)
+        control_frame.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Plot controls
+        plot_frame = ttk.LabelFrame(control_frame, text="Plot Controls")
+        plot_frame.pack(padx=5, pady=2, fill=tk.X)
+
+        self.start_plot_btn = ttk.Button(plot_frame, text="Start", command=self.start_plotting)
+        self.start_plot_btn.pack(side=tk.LEFT, padx=2)
+
+        self.stop_plot_btn = ttk.Button(plot_frame, text="Stop", command=self.stop_plotting, state=tk.DISABLED)
+        self.stop_plot_btn.pack(side=tk.LEFT, padx=2)
+
+        # Log controls
+        log_frame = ttk.LabelFrame(control_frame, text="Log Controls")
+        log_frame.pack(padx=5, pady=2, fill=tk.X)
+
+        self.start_log_btn = ttk.Button(log_frame, text="Start", command=self.start_logging)
+        self.start_log_btn.pack(side=tk.LEFT, padx=2)
+
+        self.stop_log_btn = ttk.Button(log_frame, text="Stop", command=self.stop_logging, state=tk.DISABLED)
+        self.stop_log_btn.pack(side=tk.LEFT, padx=2)
+
+        # Right Side: Sensor Values
+        sensor_frame = ttk.LabelFrame(main_control_frame, text="Current Values (°C)")
+        sensor_frame.pack(side=tk.LEFT, padx=10, fill=tk.BOTH, expand=True)
+
+        for i in range(4):
+            row_frame = ttk.Frame(sensor_frame)
+            row_frame.pack(fill=tk.X, pady=2)
+            ttk.Label(row_frame, text=f"Sensor {i+1}:", width=8).pack(side=tk.LEFT)
+            ttk.Label(row_frame, textvariable=self.current_values[i], 
+                     width=6, anchor='e').pack(side=tk.LEFT)
+
+        # Timer display
+        timer_frame = ttk.Frame(sensor_frame)
+        timer_frame.pack(pady=5)
+        ttk.Label(timer_frame, text="Elapsed Time:").pack(side=tk.LEFT)
+        ttk.Label(timer_frame, textvariable=self.elapsed_time, 
+                 font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
+
+        # Status bar
+        self.status_label = ttk.Label(self.master, text="Ready")
+        self.status_label.pack(padx=10, pady=2, fill=tk.X)
+
+        # Plot Frame
+        plot_frame = ttk.Frame(self.master)
+        plot_frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+        # Create matplotlib figure
+        self.fig = Figure(figsize=(8, 5), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.lines = [self.ax.plot([], [], label=f'Sensor {i+1}')[0] for i in range(4)]
+        self.ax.set_title("Live Temperature Data")
+        self.ax.set_xlabel("Time (seconds)")
+        self.ax.set_ylabel("Temperature (°C)")
+        self.ax.legend(loc='upper right')
+        self.ax.grid(True)
+
+        # Embed plot in Tkinter
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def update_com_ports(self):
+        """Refresh list of available COM ports"""
+        ports = [port.device for port in list_ports.comports()]
+        self.port_combobox['values'] = ports
+        if ports:
+            self.port_combobox.current(0)
+        else:
+            self.port_combobox.set('')
+            self.status_label.config(text="No COM ports found")
+
+    def start_plotting(self):
+        selected_port = self.port_combobox.get()
+        if not selected_port:
+            self.status_label.config(text="Select a COM port first!")
+            return
+
+        try:
+            self.ser = serial.Serial(selected_port, self.baudrate, timeout=1)
+            self.is_plotting = True
+            self.plot_start_time = time.time()
+            self.start_plot_btn.config(state=tk.DISABLED)
+            self.stop_plot_btn.config(state=tk.NORMAL)
+            self.status_label.config(text=f"Connected to {selected_port}")
+            self.conn_indicator.itemconfig(self.indicator, fill='green')
+
+            # Start serial reading thread
+            self.thread = threading.Thread(target=self.read_serial)
+            self.thread.daemon = True
+            self.thread.start()
+
+            # Start plot update loop
+            self.update_plot()
+
+        except serial.SerialException as e:
+            self.status_label.config(text=f"Error: {str(e)}")
+            self.conn_indicator.itemconfig(self.indicator, fill='red')
+
+    def stop_plotting(self):
+        self.is_plotting = False
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+        self.start_plot_btn.config(state=tk.NORMAL)
+        self.stop_plot_btn.config(state=tk.DISABLED)
+        self.status_label.config(text="Plotting stopped")
+        self.conn_indicator.itemconfig(self.indicator, fill='red')
+        self.time_data.clear()
+        for d in self.serial_data:
+            d.clear()
+
+    def start_logging(self):
+        # Ask for save location first
+        self.save_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            title="Save Data As",
+            initialfile=f"temp_data_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        )
+        
+        if not self.save_path:  # User cancelled
+            return
+            
+        self.is_logging = True
+        self.log_start_time = time.time()
+        self.raw_data = []  # Reset previous data
+        self.start_log_btn.config(state=tk.DISABLED)
+        self.stop_log_btn.config(state=tk.NORMAL)
+        self.status_label.config(text="Logging started")
+        self.elapsed_time.set("00:00:00")
+        self.update_timer()
+
+    def stop_logging(self):
+        self.is_logging = False
+        self.start_log_btn.config(state=tk.NORMAL)
+        self.stop_log_btn.config(state=tk.DISABLED)
+        self.status_label.config(text="Logging stopped")
+
+        # Save data to Excel
+        if self.raw_data and self.save_path:
+            df = pd.DataFrame(self.raw_data)
+            df.to_excel(self.save_path, index=False)
+            self.status_label.config(text=f"Data saved to {self.save_path.split('/')[-1]}")
+
+    def update_timer(self):
+        if self.is_logging:
+            elapsed = time.time() - self.log_start_time
+            hours = int(elapsed // 3600)
+            minutes = int((elapsed % 3600) // 60)
+            seconds = int(elapsed % 60)
+            self.elapsed_time.set(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+            self.master.after(1000, self.update_timer)
+
+    def read_serial(self):
+        while self.is_plotting and self.ser.is_open:
+            try:
+                line = self.ser.readline().decode().strip()
+                if line:
+                    current_time = time.time() - self.plot_start_time
+                    values = [float(x) for x in line.split(',')]
+                    if len(values) == 4:
+                        # Update current values display
+                        for i in range(4):
+                            self.current_values[i].set(f"{values[i]:.1f}")
+                        
+                        # Update plot data
+                        self.time_data.append(current_time)
+                        for i in range(4):
+                            self.serial_data[i].append(values[i])
+                        
+                        # Update log data
+                        if self.is_logging:
+                            log_time = time.time() - self.log_start_time
+                            self.raw_data.append({
+                                'Time (s)': log_time,
+                                'Temp1': values[0],
+                                'Temp2': values[1],
+                                'Temp3': values[2],
+                                'Temp4': values[3]
+                            })
+            except (ValueError, UnicodeDecodeError, IndexError):
+                pass
+
+    def update_plot(self):
+        if self.is_plotting and self.time_data:
+            for i, line in enumerate(self.lines):
+                line.set_xdata(self.time_data)
+                line.set_ydata(self.serial_data[i])
+            
+            self.ax.relim()
+            self.ax.autoscale_view()
+            self.canvas.draw()
+
+        self.master.after(100, self.update_plot)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TemperatureDataLogger(root)
+    root.mainloop()
